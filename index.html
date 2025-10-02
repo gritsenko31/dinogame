@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Chrome Dino — JS Clone</title>
+  <style>
+    :root{--bg:#f7f7f7;--ground:#666;--dino:#222;--ob:#3a3a3a;--accent:#888}
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;background:var(--bg);display:flex;align-items:center;justify-content:center}
+    .game-wrap{width:900px;max-width:95vw;height:260px;background:linear-gradient(#fff 0 60%, #e9f1ff 100%);border-radius:8px;box-shadow:0 8px 30px rgba(10,10,20,0.08);position:relative;overflow:hidden}
+    canvas{display:block;width:100%;height:100%}
+    .hud{position:absolute;right:12px;top:12px;font-weight:700;color:#222}
+    .controls{position:absolute;left:12px;top:12px;font-size:13px;color:#444}
+    .footer{position:absolute;left:12px;bottom:8px;color:#666;font-size:12px}
+    .overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+    .btn{pointer-events:auto;display:inline-block;background:#fff;border:1px solid #ddd;padding:8px 12px;border-radius:6px;cursor:pointer;margin-left:8px}
+    @media (max-width:600px){.game-wrap{height:200px}}
+  </style>
+</head>
+<body>
+  <div class="game-wrap" id="gameWrap">
+    <canvas id="game"></canvas>
+    <div class="hud" id="score">0</div>
+    <div class="controls">Space / ↑ = jump · ↓ = duck · Tap to jump</div>
+    <div class="footer">Clone by ChatGPT — нажми пробел чтобы начать</div>
+    <div class="overlay" id="overlay"></div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const wrap = document.getElementById('gameWrap');
+  const scoreEl = document.getElementById('score');
+  const overlay = document.getElementById('overlay');
+  const ctx = canvas.getContext('2d');
+
+  // Звуки
+  const sndJump = new Audio('https://actions.google.com/sounds/v1/cartoon/wood_plank_flicks.ogg');
+  const sndCrash = new Audio('https://actions.google.com/sounds/v1/cartoon/clang_and_wobble.ogg');
+
+  // HiDPI
+  function resize() {
+    const rect = wrap.getBoundingClientRect();
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  // Таблица рекордов (10 лучших)
+  function loadScores(){
+    return JSON.parse(localStorage.getItem('dino-scores')||'[]');
+  }
+  function saveScore(score){
+    let arr = loadScores();
+    arr.push({score, date:new Date().toLocaleDateString()});
+    arr.sort((a,b)=>b.score-a.score);
+    arr = arr.slice(0,10);
+    localStorage.setItem('dino-scores', JSON.stringify(arr));
+  }
+
+  // Game state
+  const G = {
+    running:false,
+    speed:6,
+    gravity:0.6,
+    score:0,
+    high: parseInt(localStorage.getItem('dino-high')||0,10),
+    obstacleTimer:0,
+    obstacleGap:90,
+    entities:[],
+    clouds:[],
+    groundY: null,
+    frame:0,
+    level:1
+  };
+
+  function rand(a,b){return Math.random()*(b-a)+a}
+
+  // Player с анимацией
+  const player = {
+    x:40, y:0, w:44, h:44, vy:0, grounded:false, duck:false, anim:0,
+    draw(){
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      const hh = this.duck?28:44;
+      ctx.fillStyle = '#222';
+      // простая анимация ног
+      if(this.grounded){
+        this.anim = (G.frame%20<10)?0:1;
+        ctx.fillRect(0,0,this.w,hh);
+        ctx.fillStyle='#fff'; ctx.fillRect(this.w-12,8,6,6);
+        ctx.fillStyle='#000';
+        if(this.anim===0){ ctx.fillRect(4,hh,10,6);} else { ctx.fillRect(24,hh,10,6);} 
+      } else {
+        ctx.fillRect(0,0,this.w,hh);
+        ctx.fillStyle='#fff'; ctx.fillRect(this.w-12,8,6,6);
+      }
+      ctx.restore();
+    },
+    update(){
+      if(!this.grounded){ this.vy += G.gravity; this.y += this.vy; }
+      if(this.y > G.groundY - this.h) { this.y = G.groundY - this.h; this.vy=0; this.grounded=true; }
+      if(this.duck) this.h = 28; else this.h = 44;
+    }
+  };
+
+  class Obstacle{
+    constructor(type){
+      this.type = type || 'cactus';
+      this.w = this.type==='bird'?46:28;
+      this.h = this.type==='bird'?30:rand(30,60);
+      this.x = canvas.width/ (window.devicePixelRatio||1) + 20;
+      this.y = G.groundY - this.h;
+      this.frame = 0;
+    }
+    update(){ this.x -= G.speed; this.frame++; }
+    draw(){
+      ctx.save(); ctx.translate(this.x, this.y);
+      ctx.fillStyle = '#3a3a3a';
+      if(this.type==='bird'){
+        const bob = (Math.floor(this.frame/6)%2)*6;
+        ctx.fillRect(0,bob, this.w, this.h);
+      } else {
+        ctx.fillRect(0,0,this.w,this.h);
+      }
+      ctx.restore();
+    }
+    collides(px,py,pw,ph){
+      return !(px+pw < this.x || px > this.x+this.w || py+ph < this.y || py > this.y+this.h);
+    }
+  }
+
+  function spawnObstacle(){
+    const t = Math.random() < 0.18 ? 'bird' : 'cactus';
+    G.entities.push(new Obstacle(t));
+  }
+
+  function reset(){
+    G.running = false; G.speed = 6; G.score = 0; G.entities = []; G.clouds = []; G.obstacleTimer = 0; G.frame=0; G.level=1;
+    player.y = 0; player.vy=0; player.grounded=false; player.duck=false; overlay.innerHTML = '';
+    resize();
+    G.groundY = canvas.height / (window.devicePixelRatio||1) - 48;
+    player.y = G.groundY - player.h;
+    drawStartOverlay();
+  }
+
+  function start(){ if(G.running) return; G.running=true; overlay.innerHTML=''; loop(); }
+
+  function gameOver(){
+    G.running=false;
+    sndCrash.play();
+    if(G.score>G.high){ G.high = G.score; localStorage.setItem('dino-high', G.high); }
+    saveScore(G.score);
+    showGameOver();
+  }
+
+  function drawStartOverlay(){
+    overlay.style.pointerEvents='none';
+    overlay.innerHTML = `<div style="text-align:center;pointer-events:none"><div style="background:rgba(255,255,255,0.9);padding:14px 18px;border-radius:8px;border:1px solid #eee">Нажми <b>Space</b> или <b>Tap</b> чтобы начать</div></div>`;
+  }
+
+  function showGameOver(){
+    const scores = loadScores();
+    let table = '<ol style="text-align:left">'+scores.map(s=>`<li>${s.score} (${s.date})</li>`).join('')+'</ol>';
+    overlay.style.pointerEvents='auto';
+    overlay.innerHTML = `<div style="text-align:center"><div style="background:#fff;padding:14px 18px;border-radius:8px;border:1px solid #eee">Game Over<br><b>Score:</b> ${G.score} · <b>High:</b> ${G.high}<br><br>Таблица рекордов:${table}<div style="margin-top:8px"><button class='btn' id='btnRestart'>Restart</button></div></div></div>`;
+    document.getElementById('btnRestart').onclick = ()=>{ reset(); start(); };
+  }
+
+  // input
+  addEventListener('keydown', e=>{
+    if(e.key === ' ' || e.key === 'ArrowUp') {
+      e.preventDefault(); if(!G.running) start(); jump();
+    }
+    if(e.key === 'ArrowDown') { player.duck=true; }
+    if(e.key === 'r' && !G.running) { reset(); start(); }
+  });
+  addEventListener('keyup', e=>{ if(e.key === 'ArrowDown') player.duck=false; });
+
+  // touch
+  canvas.addEventListener('touchstart', e=>{ e.preventDefault(); if(!G.running) start(); jump(); }, {passive:false});
+
+  function jump(){ if(player.grounded){ player.vy = -11; player.grounded=false; sndJump.play(); } }
+
+  function update(){
+    G.frame++;
+    if(G.frame % 300 === 0) { G.speed += 0.6; G.level++; }
+    G.obstacleTimer++;
+    const gap = Math.max(50, G.obstacleGap - Math.floor(G.speed*4));
+    if(G.obstacleTimer > gap){ spawnObstacle(); G.obstacleTimer = 0; }
+
+    for(let i=G.entities.length-1;i>=0;i--){
+      const e = G.entities[i]; e.update();
+      if(e.x + e.w < -20) G.entities.splice(i,1);
+      if(e.collides(player.x, player.y, player.w, player.h)){
+        if(!(player.duck && e.type!=='bird')) gameOver();
+      }
+    }
+
+    player.update();
+    if(G.running) G.score = Math.floor(G.frame/5);
+    scoreEl.textContent = `Score: ${G.score} · Lvl: ${G.level}`;
+  }
+
+  function draw(){
+    const W = canvas.width/(window.devicePixelRatio||1);
+    const H = canvas.height/(window.devicePixelRatio||1);
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = '#f7f7f7';
+    ctx.fillRect(0,0,W,H);
+    const gy = G.groundY = H - 48;
+    ctx.fillStyle = '#666';
+    ctx.fillRect(0, gy, W, 48);
+    player.draw();
+    G.entities.forEach(e=> e.draw());
+    ctx.save(); ctx.font = '14px system-ui, Arial'; ctx.fillStyle = '#222'; ctx.textAlign = 'right'; ctx.fillText('HI ' + G.high, W-12, 20); ctx.restore();
+  }
+
+  function loop(){
+    if(!G.running) return;
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  reset();
+})();
+</script>
+</body>
+</html>
